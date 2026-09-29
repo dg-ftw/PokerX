@@ -1,5 +1,8 @@
 .pnpm-store/
 poker-engine/node_modules/
 poker-engine/dist/
+client/node_modules/
+client/dist/
 /poker-engine.zip
 *.log
+*.tsbuildinfo

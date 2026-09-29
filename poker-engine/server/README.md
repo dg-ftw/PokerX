@@ -27,6 +27,7 @@ State is emitted individually to each connected seat using `Hand.getViewFor(play
 | `hand:discard` | `Card[]` | Player with a pending discard |
 | `host:settings` | partial table settings | Host, between hands |
 | `host:kick` | `{ playerId }` | Host, between hands |
+| `host:transfer` | `{ newHostId }` | Host |
 | `host:mute` | `{ playerId, muted }` | Host |
 | `host:pause` | `{ paused }` | Host |
 | `host:topup` | `{ playerId, amount }` | Host, between hands |

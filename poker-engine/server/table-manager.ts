@@ -231,10 +231,20 @@ export class TableManager {
     this.onUpdate(table.code);
   }
 
+  transferHost(socketId: string, newHostId: string): void {
+    const table = this.requireHostTable(socketId);
+    const newHost = this.requireSeat(table, newHostId);
+    table.hostId = newHost.id;
+    this.onUpdate(table.code);
+  }
+
   leave(socketId: string): string {
     const { table, seat } = this.requireSocketSeatTuple(socketId);
     if (table.hand && !table.hand.isComplete) throw new Error('You can leave after the hand ends.');
-    if (seat.id === table.hostId && table.seats.length > 1) throw new Error('Host must transfer the table before leaving.');
+    if (seat.id === table.hostId && table.seats.length > 1) {
+      const nextHost = table.seats.find((s) => s.id !== seat.id);
+      if (nextHost) table.hostId = nextHost.id;
+    }
     table.seats = table.seats.filter((entry) => entry.id !== seat.id);
     this.socketTable.delete(socketId);
     if (!table.seats.length) { this.clearTimer(table); this.tables.delete(table.code); }
@@ -281,11 +291,12 @@ export class TableManager {
           if (legal) hand.act(legal.playerId, hand.defaultAction());
         } else if (hand.phase === 'discarding') {
           const pending = Object.keys(hand.getFullState().pendingDiscards);
-          if (pending.length) hand.autoDiscard(pending[0]);
+          for (const id of pending) hand.autoDiscard(id);
         }
         this.afterMutation(table);
       } catch { this.schedule(table); }
     }, delay);
+    table.timer.unref?.();
   }
 
   private clearTimer(table: Table): void { if (table.timer) clearTimeout(table.timer); table.timer = null; }
