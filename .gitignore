@@ -1,0 +1,4 @@
+.pnpm-store/
+poker-engine/node_modules/
+poker-engine/dist/
+*.log
