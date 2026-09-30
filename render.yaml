@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: pokerx-server
+    runtime: node
+    rootDir: poker-engine
+    buildCommand: npm install
+    startCommand: npm run server
+    envVars:
+      - key: PORT
+        value: 3001
+      - key: CLIENT_ORIGIN
+        value: "*"
