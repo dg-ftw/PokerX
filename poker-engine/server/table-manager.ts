@@ -6,7 +6,8 @@ export interface TableSettings {
   betting: BettingStructure;
   smallBlind: number;
   bigBlind: number;
-  startingStack: number;
+  /** Legacy setting for older clients. New clients choose a stack when claiming a seat. */
+  startingStack?: number;
   seatCount: number;
   turnTimerSeconds: number;
   discardSchedule?: DiscardSchedule;
@@ -19,6 +20,8 @@ interface Seat {
   token: string;
   socketId: string | null;
   stack: number;
+  initialStack: number;
+  seatIndex: number | null;
   sittingOut: boolean;
   muted: boolean;
 }
@@ -27,6 +30,7 @@ export interface PlayerView {
   id: string;
   name: string;
   stack: number;
+  seatIndex: number | null;
   connected: boolean;
   sittingOut: boolean;
   muted: boolean;
@@ -73,29 +77,56 @@ export class TableManager {
     this.onChat = onChat;
   }
 
-  createTable(socketId: string, name: string, settings: TableSettings): JoinResult {
+  createTable(socketId: string, name: string, settings: TableSettings, deferSeat = false): JoinResult {
     this.ensureUnseated(socketId);
     this.validateSettings(settings);
     const code = this.newCode();
     const playerId = randomUUID();
-    const seat: Seat = { id: playerId, name: this.cleanName(name), token: randomBytes(32).toString('base64url'), socketId, stack: settings.startingStack, sittingOut: false, muted: false };
+    const initialStack = deferSeat ? 0 : (settings.startingStack ?? 200);
+    const seat: Seat = { id: playerId, name: this.cleanName(name), token: randomBytes(32).toString('base64url'), socketId, stack: initialStack, initialStack, seatIndex: deferSeat ? null : 0, sittingOut: deferSeat, muted: false };
     const table: Table = { code, hostId: playerId, buttonId: playerId, settings: structuredClone(settings), seats: [seat], paused: false, nextHandBombAnte: null, handNumber: 0, hand: null, timer: null, chat: [] };
     this.tables.set(code, table);
     this.socketTable.set(socketId, code);
     return { playerId, reconnectToken: seat.token, table: this.view(table, playerId) };
   }
 
-  joinTable(socketId: string, code: string, name: string): JoinResult {
+  joinTable(socketId: string, code: string, name: string, deferSeat = false): JoinResult {
     this.ensureUnseated(socketId);
     const table = this.requireTable(code);
     if (table.seats.length >= table.settings.seatCount) throw new Error('This table is full.');
     if (table.seats.some((seat) => seat.name.toLowerCase() === this.cleanName(name).toLowerCase())) throw new Error('That display name is already seated.');
     const playerId = randomUUID();
-    const seat: Seat = { id: playerId, name: this.cleanName(name), token: randomBytes(32).toString('base64url'), socketId, stack: table.settings.startingStack, sittingOut: false, muted: false };
+    const seatIndex = deferSeat ? null : this.nextSeatIndex(table);
+    const initialStack = deferSeat ? 0 : (table.settings.startingStack ?? 200);
+    const seat: Seat = { id: playerId, name: this.cleanName(name), token: randomBytes(32).toString('base64url'), socketId, stack: initialStack, initialStack, seatIndex, sittingOut: deferSeat, muted: false };
     table.seats.push(seat);
     this.socketTable.set(socketId, code.toUpperCase());
     this.onUpdate(table.code);
     return { playerId, reconnectToken: seat.token, table: this.view(table, playerId) };
+  }
+
+  takeSeat(socketId: string, seatIndex: number, stack: number, sittingOut = false): void {
+    const { table, seat } = this.requireSocketSeatTuple(socketId);
+    if (table.hand && !table.hand.isComplete) throw new Error('Seats can only be changed between hands.');
+    if (!Number.isInteger(seatIndex) || seatIndex < 0 || seatIndex >= table.settings.seatCount) throw new Error('Choose an available seat.');
+    if (!Number.isSafeInteger(stack) || stack <= 0 || stack > 1_000_000_000) throw new Error('Stack must be a positive whole number.');
+    const occupied = table.seats.find((entry) => entry.seatIndex === seatIndex && entry.id !== seat.id);
+    if (occupied) throw new Error('That seat has already been taken.');
+    seat.seatIndex = seatIndex;
+    seat.stack = stack;
+    seat.initialStack = stack;
+    seat.sittingOut = Boolean(sittingOut);
+    this.onUpdate(table.code);
+  }
+
+  standUp(socketId: string): void {
+    const { table, seat } = this.requireSocketSeatTuple(socketId);
+    if (table.hand && !table.hand.isComplete) throw new Error('You can stand up after the hand ends.');
+    seat.seatIndex = null;
+    seat.stack = 0;
+    seat.initialStack = 0;
+    seat.sittingOut = true;
+    this.onUpdate(table.code);
   }
 
   reconnect(socketId: string, code: string, playerId: string, token: string): JoinResult {
@@ -168,11 +199,11 @@ export class TableManager {
   updateSettings(socketId: string, changes: Partial<TableSettings>): void {
     const table = this.requireHostTable(socketId);
     if (table.hand && !table.hand.isComplete) throw new Error('Settings can only change between hands.');
-    const allowed = new Set(['variant', 'betting', 'smallBlind', 'bigBlind', 'startingStack', 'seatCount', 'turnTimerSeconds', 'discardSchedule', 'doubleBoard']);
+    const allowed = new Set(['variant', 'betting', 'smallBlind', 'bigBlind', 'seatCount', 'turnTimerSeconds', 'discardSchedule', 'doubleBoard']);
     if (!changes || typeof changes !== 'object' || Object.keys(changes).some((key) => !allowed.has(key))) throw new Error('Settings contain an unsupported field.');
     const updated = { ...table.settings, ...changes };
     this.validateSettings(updated);
-    if (updated.seatCount < table.seats.length) throw new Error('Seat count cannot be lower than the number of seated players.');
+    if (updated.seatCount < table.seats.filter((seat) => seat.seatIndex !== null).length) throw new Error('Seat count cannot be lower than the number of seated players.');
     table.settings = updated;
     this.onUpdate(table.code);
   }
@@ -213,7 +244,7 @@ export class TableManager {
   resetStacks(socketId: string): void {
     const table = this.requireHostTable(socketId);
     if (table.hand && !table.hand.isComplete) throw new Error('Stacks can only be reset between hands.');
-    table.seats.forEach((seat) => { seat.stack = table.settings.startingStack; });
+    table.seats.forEach((seat) => { if (seat.seatIndex !== null) seat.stack = seat.initialStack; });
     this.onUpdate(table.code);
   }
 
@@ -227,6 +258,7 @@ export class TableManager {
   setSittingOut(socketId: string, sittingOut: boolean): void {
     const { table, seat } = this.requireSocketSeatTuple(socketId);
     if (table.hand && !table.hand.isComplete) throw new Error('You can sit out between hands.');
+    if (seat.seatIndex === null) throw new Error('Choose a seat before changing your away status.');
     seat.sittingOut = sittingOut;
     this.onUpdate(table.code);
   }
@@ -307,7 +339,7 @@ export class TableManager {
     const state = hand ? hand.getViewFor(playerId) : null;
     return {
       code: table.code, hostId: table.hostId, settings: structuredClone(table.settings),
-      players: table.seats.map((seat) => ({ id: seat.id, name: seat.name, stack: seat.stack, connected: seat.socketId !== null, sittingOut: seat.sittingOut, muted: seat.muted, isHost: seat.id === table.hostId })),
+      players: table.seats.map((seat) => ({ id: seat.id, name: seat.name, stack: seat.stack, seatIndex: seat.seatIndex, connected: seat.socketId !== null, sittingOut: seat.sittingOut, muted: seat.muted, isHost: seat.id === table.hostId })),
       hand: state, legalActions: legal?.playerId === playerId ? legal : null, paused: table.paused,
       nextHandBombAnte: table.nextHandBombAnte, handNumber: table.handNumber,
       handLog: hand?.isComplete ? [...hand.log] : [],
@@ -360,6 +392,12 @@ export class TableManager {
     if (this.socketTable.has(socketId)) throw new Error('Leave your current table before joining another.');
   }
 
+  private nextSeatIndex(table: Table): number | null {
+    const occupied = new Set(table.seats.map((seat) => seat.seatIndex).filter((index): index is number => index !== null));
+    for (let i = 0; i < table.settings.seatCount; i++) if (!occupied.has(i)) return i;
+    return null;
+  }
+
   private cleanName(name: string): string {
     if (typeof name !== 'string') throw new Error('Display name must be text.');
     const clean = name.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 24);
@@ -370,9 +408,10 @@ export class TableManager {
   private validateSettings(settings: TableSettings): void {
     if (!settings || !['holdem', 'texas3', 'plo4', 'plo5', 'pineapple3', 'pineapple4', 'pineapple5'].includes(settings.variant)) throw new Error('Choose a supported poker variant.');
     if (!['nolimit', 'potlimit'].includes(settings.betting)) throw new Error('Choose no-limit or pot-limit betting.');
-    for (const [label, value, max] of [['Small blind', settings.smallBlind, 1_000_000], ['Big blind', settings.bigBlind, 1_000_000], ['Starting stack', settings.startingStack, 1_000_000_000]] as const) {
+    for (const [label, value, max] of [['Small blind', settings.smallBlind, 1_000_000], ['Big blind', settings.bigBlind, 1_000_000]] as const) {
       if (!Number.isSafeInteger(value) || value <= 0 || value > max) throw new Error(`${label} must be a positive whole number.`);
     }
+    if (settings.startingStack !== undefined && (!Number.isSafeInteger(settings.startingStack) || settings.startingStack <= 0 || settings.startingStack > 1_000_000_000)) throw new Error('Legacy starting stack must be a positive whole number.');
     if (settings.bigBlind < settings.smallBlind) throw new Error('Big blind cannot be smaller than the small blind.');
     if (!Number.isInteger(settings.seatCount) || settings.seatCount < 2 || settings.seatCount > 9) throw new Error('Seat count must be between 2 and 9.');
     if (!Number.isInteger(settings.turnTimerSeconds) || settings.turnTimerSeconds < 5 || settings.turnTimerSeconds > 300) throw new Error('Turn timer must be between 5 and 300 seconds.');

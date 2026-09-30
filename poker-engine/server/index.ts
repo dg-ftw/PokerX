@@ -38,14 +38,14 @@ export function createPokerServer() {
   }
 
   io.on('connection', (socket) => {
-    socket.on('table:create', (payload: { name: string; settings: TableSettings }, ack?: unknown) => respond(socket, ack, () => {
-      const result = tables.createTable(socket.id, payload.name, payload.settings);
+    socket.on('table:create', (payload: { name: string; settings: TableSettings; deferSeat?: boolean }, ack?: unknown) => respond(socket, ack, () => {
+      const result = tables.createTable(socket.id, payload.name, payload.settings, payload.deferSeat ?? false);
       joinRoom(socket, result.table.code);
       return result;
     }, 'table:created'));
 
-    socket.on('table:join', (payload: { code: string; name: string }, ack?: unknown) => respond(socket, ack, () => {
-      const result = tables.joinTable(socket.id, payload.code, payload.name);
+    socket.on('table:join', (payload: { code: string; name: string; deferSeat?: boolean }, ack?: unknown) => respond(socket, ack, () => {
+      const result = tables.joinTable(socket.id, payload.code, payload.name, payload.deferSeat ?? false);
       joinRoom(socket, result.table.code);
       return result;
     }, 'table:joined'));
@@ -57,6 +57,8 @@ export function createPokerServer() {
     }, 'table:reconnected'));
 
     socket.on('table:get', (_payload: unknown, ack?: unknown) => respond(socket, ack, () => tables.viewForSocket(socket.id), ''));
+    socket.on('player:take-seat', (payload: { seatIndex: number; stack: number; sittingOut?: boolean }, ack?: unknown) => respond(socket, ack, () => { tables.takeSeat(socket.id, payload.seatIndex, payload.stack, payload.sittingOut ?? false); return { seated: true }; }, ''));
+    socket.on('player:stand-up', (_payload: unknown, ack?: unknown) => respond(socket, ack, () => { tables.standUp(socket.id); return { standing: true }; }, ''));
     socket.on('hand:start', (_payload: unknown, ack?: unknown) => respond(socket, ack, () => { tables.startHand(socket.id); return { started: true }; }, ''));
     socket.on('hand:act', (action: Action, ack?: unknown) => respond(socket, ack, () => { tables.act(socket.id, action); return { accepted: true }; }, ''));
     socket.on('hand:discard', (cards: Card[], ack?: unknown) => respond(socket, ack, () => { tables.discard(socket.id, cards); return { accepted: true }; }, ''));
